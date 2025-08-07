@@ -1,19 +1,28 @@
+// === IMPORTACIONES ===
+// Express Router para crear rutas modulares
 const express = require('express');
 const router = express.Router();
+// Modelos de la base de datos (Reserva y Cancha)
 const { Reserva, Cancha } = require('../models');
+// Operadores de Sequelize para consultas complejas (mayor que, menor que, between, etc.)
 const { Op } = require('sequelize');
 
-// Obtener todas las reservas con información de la cancha
+// === ENDPOINT: GET /api/reservas ===
+// Obtiene todas las reservas con información de la cancha asociada
 router.get('/', async (req, res) => {
   try {
+    // Busca todas las reservas e incluye datos de la cancha relacionada
     const reservas = await Reserva.findAll({
       include: [{
-        model: Cancha,
-        as: 'cancha',
-        attributes: ['id', 'nombre']
+        model: Cancha,           // Incluye datos del modelo Cancha
+        as: 'cancha',            // Alias para la relación
+        attributes: ['id', 'nombre'] // Solo trae ID y nombre de la cancha
       }],
+      // Ordena primero por fecha, luego por hora de inicio
       order: [['fecha', 'ASC'], ['horaInicio', 'ASC']]
     });
+    
+    // Envía las reservas como respuesta JSON
     res.json(reservas);
   } catch (error) {
     console.error('Error al obtener reservas:', error);
@@ -21,19 +30,24 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Obtener reservas de una fecha específica
+// === ENDPOINT: GET /api/reservas/fecha/:fecha ===
+// Obtiene todas las reservas de una fecha específica
 router.get('/fecha/:fecha', async (req, res) => {
   try {
+    // Extrae la fecha de los parámetros de la URL
     const { fecha } = req.params;
+    
+    // Busca reservas solo de esa fecha específica
     const reservas = await Reserva.findAll({
-      where: { fecha },
+      where: { fecha },          // Filtra por fecha exacta
       include: [{
         model: Cancha,
         as: 'cancha',
         attributes: ['id', 'nombre']
       }],
-      order: [['horaInicio', 'ASC']]
+      order: [['horaInicio', 'ASC']] // Ordena por hora de inicio
     });
+    
     res.json(reservas);
   } catch (error) {
     console.error('Error al obtener reservas por fecha:', error);
@@ -41,37 +55,46 @@ router.get('/fecha/:fecha', async (req, res) => {
   }
 });
 
-// Verificar disponibilidad
+// === ENDPOINT: POST /api/reservas/verificar-disponibilidad ===
+// Verifica si un horario está disponible para reservar
 router.post('/verificar-disponibilidad', async (req, res) => {
   try {
+    // Extrae los datos del horario a verificar
     const { canchaId, fecha, horaInicio, horaFin } = req.body;
 
+    // Busca conflictos de horario con reservas activas
     const conflictos = await Reserva.findAll({
       where: {
-        canchaId,
-        fecha,
-        estado: 'activa',
+        canchaId,              // Misma cancha
+        fecha,                 // Misma fecha
+        estado: 'activa',      // Solo reservas activas
+        
+        // Operador OR: busca cualquiera de estos conflictos de tiempo
         [Op.or]: [
+          // CONFLICTO 1: La hora de inicio de otra reserva está dentro del nuevo horario
           {
             horaInicio: {
-              [Op.between]: [horaInicio, horaFin]
+              [Op.between]: [horaInicio, horaFin] // horaInicio BETWEEN nuevo_inicio AND nuevo_fin
             }
           },
+          // CONFLICTO 2: La hora de fin de otra reserva está dentro del nuevo horario
           {
             horaFin: {
-              [Op.between]: [horaInicio, horaFin]
+              [Op.between]: [horaInicio, horaFin] // horaFin BETWEEN nuevo_inicio AND nuevo_fin
             }
           },
+          // CONFLICTO 3: Una reserva existente cubre completamente el nuevo horario
           {
             [Op.and]: [
-              { horaInicio: { [Op.lte]: horaInicio } },
-              { horaFin: { [Op.gte]: horaFin } }
+              { horaInicio: { [Op.lte]: horaInicio } }, // Empieza antes o igual
+              { horaFin: { [Op.gte]: horaFin } }         // Termina después o igual
             ]
           }
         ]
       }
     });
 
+    // Responde si está disponible (sin conflictos) y cuenta de conflictos
     res.json({
       disponible: conflictos.length === 0,
       conflictos: conflictos.length
@@ -82,9 +105,11 @@ router.post('/verificar-disponibilidad', async (req, res) => {
   }
 });
 
-// Crear nueva reserva
+// === ENDPOINT: POST /api/reservas ===
+// Crea una nueva reserva después de verificar disponibilidad
 router.post('/', async (req, res) => {
   try {
+    // Extrae todos los datos necesarios para la reserva
     const { 
       grupoEstudiantil, 
       contacto, 
@@ -96,20 +121,21 @@ router.post('/', async (req, res) => {
       observaciones 
     } = req.body;
 
-    // Validaciones básicas
+    // === VALIDACIÓN 1: Campos obligatorios ===
     if (!grupoEstudiantil || !contacto || !fecha || !horaInicio || !horaFin || !canchaId) {
       return res.status(400).json({ 
         error: 'Faltan campos requeridos: grupoEstudiantil, contacto, fecha, horaInicio, horaFin, canchaId' 
       });
     }
 
-    // Verificar que la cancha existe
+    // === VALIDACIÓN 2: Verificar que la cancha existe ===
     const cancha = await Cancha.findByPk(canchaId);
     if (!cancha) {
       return res.status(404).json({ error: 'Cancha no encontrada' });
     }
 
-    // Verificar disponibilidad
+    // === VALIDACIÓN 3: Verificar disponibilidad de horario ===
+    // Usa la misma lógica de verificación que el endpoint anterior
     const conflictos = await Reserva.findAll({
       where: {
         canchaId,
@@ -136,6 +162,7 @@ router.post('/', async (req, res) => {
       }
     });
 
+    // Si hay conflictos, no permite crear la reserva
     if (conflictos.length > 0) {
       return res.status(409).json({ 
         error: 'Ya existe una reserva en ese horario',
@@ -143,7 +170,8 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Crear la reserva
+    // === CREACIÓN DE LA RESERVA ===
+    // Si pasa todas las validaciones, crea la nueva reserva
     const nuevaReserva = await Reserva.create({
       grupoEstudiantil,
       contacto,
@@ -155,7 +183,8 @@ router.post('/', async (req, res) => {
       observaciones
     });
 
-    // Obtener la reserva completa con datos de la cancha
+    // === RESPUESTA COMPLETA ===
+    // Obtiene la reserva recién creada con datos de la cancha incluidos
     const reservaCompleta = await Reserva.findByPk(nuevaReserva.id, {
       include: [{
         model: Cancha,
@@ -164,6 +193,7 @@ router.post('/', async (req, res) => {
       }]
     });
 
+    // Envía la reserva creada con código 201 (Created)
     res.status(201).json(reservaCompleta);
   } catch (error) {
     console.error('Error al crear reserva:', error);
@@ -171,14 +201,17 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Cancelar reserva
+// === ENDPOINT: PUT /api/reservas/:id/cancelar ===
+// Cambia el estado de una reserva a 'cancelada' (soft delete)
 router.put('/:id/cancelar', async (req, res) => {
   try {
+    // Busca la reserva por ID
     const reserva = await Reserva.findByPk(req.params.id);
     if (!reserva) {
       return res.status(404).json({ error: 'Reserva no encontrada' });
     }
 
+    // Cambia el estado a cancelada (no la elimina de la BD)
     reserva.estado = 'cancelada';
     await reserva.save();
 
@@ -189,14 +222,16 @@ router.put('/:id/cancelar', async (req, res) => {
   }
 });
 
-// Obtener una reserva específica
+// === ENDPOINT: GET /api/reservas/:id ===
+// Obtiene los detalles completos de una reserva específica
 router.get('/:id', async (req, res) => {
   try {
+    // Busca la reserva con datos de la cancha incluidos
     const reserva = await Reserva.findByPk(req.params.id, {
       include: [{
         model: Cancha,
         as: 'cancha',
-        attributes: ['id', 'nombre', 'descripcion']
+        attributes: ['id', 'nombre', 'descripcion'] // Incluye descripción para más detalles
       }]
     });
     
@@ -211,7 +246,8 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Editar reserva
+// === ENDPOINT: PUT /api/reservas/:id ===
+// Edita una reserva existente con validaciones completas
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -226,29 +262,30 @@ router.put('/:id', async (req, res) => {
       observaciones 
     } = req.body;
 
-    // Verificar que la reserva existe
+    // === VALIDACIÓN 1: Verificar que la reserva existe ===
     const reserva = await Reserva.findByPk(id);
     if (!reserva) {
       return res.status(404).json({ error: 'Reserva no encontrada' });
     }
 
-    // Validaciones básicas
+    // === VALIDACIÓN 2: Campos obligatorios ===
     if (!grupoEstudiantil || !contacto || !fecha || !horaInicio || !horaFin || !canchaId) {
       return res.status(400).json({ 
         error: 'Faltan campos requeridos: grupoEstudiantil, contacto, fecha, horaInicio, horaFin, canchaId' 
       });
     }
 
-    // Verificar que la cancha existe
+    // === VALIDACIÓN 3: Verificar que la cancha existe ===
     const cancha = await Cancha.findByPk(canchaId);
     if (!cancha) {
       return res.status(404).json({ error: 'Cancha no encontrada' });
     }
 
-    // Verificar disponibilidad (excluyendo la reserva actual)
+    // === VALIDACIÓN 4: Verificar disponibilidad (excluyendo la reserva actual) ===
+    // Similar a la creación, pero excluye la reserva que se está editando
     const conflictos = await Reserva.findAll({
       where: {
-        id: { [Op.ne]: id }, // Excluir la reserva actual
+        id: { [Op.ne]: id }, // Op.ne = "not equal" - excluye la reserva actual
         canchaId,
         fecha,
         estado: 'activa',
@@ -280,7 +317,8 @@ router.put('/:id', async (req, res) => {
       });
     }
 
-    // Actualizar la reserva
+    // === ACTUALIZACIÓN ===
+    // Si pasa todas las validaciones, actualiza la reserva
     await reserva.update({
       grupoEstudiantil,
       contacto,
@@ -292,7 +330,8 @@ router.put('/:id', async (req, res) => {
       observaciones
     });
 
-    // Obtener la reserva actualizada con datos de la cancha
+    // === RESPUESTA ===
+    // Obtiene la reserva actualizada con datos de la cancha
     const reservaActualizada = await Reserva.findByPk(id, {
       include: [{
         model: Cancha,
@@ -308,14 +347,17 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Eliminar reserva permanentemente
+// === ENDPOINT: DELETE /api/reservas/:id ===
+// Elimina permanentemente una reserva de la base de datos (hard delete)
 router.delete('/:id', async (req, res) => {
   try {
+    // Busca la reserva por ID
     const reserva = await Reserva.findByPk(req.params.id);
     if (!reserva) {
       return res.status(404).json({ error: 'Reserva no encontrada' });
     }
 
+    // Elimina la reserva permanentemente de la base de datos
     await reserva.destroy();
     res.json({ message: 'Reserva eliminada exitosamente' });
   } catch (error) {
@@ -324,4 +366,6 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// === EXPORTACIÓN ===
+// Exporta todas las rutas para que server.js pueda usarlas
 module.exports = router;
